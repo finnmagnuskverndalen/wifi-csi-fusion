@@ -160,7 +160,7 @@ def draw_hud(canvas,W,H,show_map,show_nodes,csi_present,fps,online_n,total_n):
 
 # ── Terminal ──────────────────────────────────────────────────────────────────
 class Terminal:
-    LH=15;FSC=0.72;MAX=16
+    LH=13;FSC=0.60;MAX=20
     def __init__(self):
         self.lines=collections.deque(maxlen=self.MAX);self._next=0
     def tick(self,nodes=3):
@@ -178,14 +178,14 @@ class Terminal:
         for i,line in enumerate(self.lines):
             y=y0+i*self.LH;last=(i==n-1)
             col=ACCENT if last else(TEXT_SEC if i/max(n-1,1)>0.5 else TEXT_DIM)
-            cv2.putText(canvas,">",(x,y),cv2.FONT_HERSHEY_PLAIN,self.FSC,
+            cv2.putText(canvas,">",(x,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,
                         ACCENT_DIM if not last else ACCENT,1,cv2.LINE_AA)
-            cv2.putText(canvas,line,(x+12,y),cv2.FONT_HERSHEY_PLAIN,
-                        self.FSC,col,1,cv2.LINE_AA)
+            cv2.putText(canvas,line,(x+12,y),cv2.FONT_HERSHEY_SIMPLEX,
+                        0.28,col,1,cv2.LINE_AA)
         if blink and n>0:
             tw,_=cv2.getTextSize(self.lines[-1],cv2.FONT_HERSHEY_PLAIN,self.FSC,1)
             cx=x+12+tw[0]+3;cy=y0+(n-1)*self.LH
-            cv2.rectangle(canvas,(cx,cy-9),(cx+6,cy+1),ACCENT,-1)
+            cv2.rectangle(canvas,(cx,cy-7),(cx+5,cy+1),ACCENT,-1)
 
 
 # ── CSI receiver ──────────────────────────────────────────────────────────────
