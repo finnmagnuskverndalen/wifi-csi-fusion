@@ -458,7 +458,15 @@ def main():
     print(f"[INFO] Window {W}x{H} (16:9)")
     print("[INFO] 1=nodes  2=map  S=screenshot  Q=quit")
 
+    # set window size from camera native resolution once
+    if cap:
+        ok,probe=cap.read()
+        if ok and probe is not None:
+            fh_nat,fw_nat=probe.shape[:2]
+            W=fw_nat; H=fh_nat+BTN_H
+            cv2.resizeWindow("WiFi CSI Fusion",W,H)
     fps_q=collections.deque(maxlen=30);ts_ms=0
+    xoff=0;yoff=0;nw=W;nh=video_h=H-BTN_H
 
     try:
         while True:
@@ -472,8 +480,8 @@ def main():
             room.update(snap,ests,args.timeout)
 
             # ── canvas ────────────────────────────────────────────────────────
-            canvas=np.full((H,W,3),BG,dtype=np.uint8)
             video_h=H-BTN_H
+            canvas=np.full((H,W,3),BG,dtype=np.uint8)
 
             result=None
             if cap and detector:
@@ -486,19 +494,26 @@ def main():
                     if target_w<=fw:
                         x0=(fw-target_w)//2
                         frame=frame[:,x0:x0+target_w]
-                    cam=cv2.resize(frame,(W,video_h))
-                    gray=cv2.cvtColor(cam,cv2.COLOR_BGR2GRAY)
+                    pass  # cam written above
+                    # letterbox
+                    fh2,fw2=frame.shape[:2]
+                    scale=min(W/fw2,video_h/fh2)
+                    nw=int(fw2*scale); nh=int(fh2*scale)
+                    xoff=(W-nw)//2; yoff=(video_h-nh)//2
+                    resized=cv2.resize(frame,(nw,nh))
+                    gray=cv2.cvtColor(resized,cv2.COLOR_BGR2GRAY)
                     gray3=cv2.cvtColor(gray,cv2.COLOR_GRAY2BGR)
-                    cam=cv2.addWeighted(cam,0.28,gray3,0.72,0)
+                    cam=cv2.addWeighted(resized,0.28,gray3,0.72,0)
                     cam=cv2.addWeighted(cam,0.82,np.zeros_like(cam),0.18,0)
                     cam[:,:,1]=np.clip(cam[:,:,1].astype(np.int32)+6,0,255).astype(np.uint8)
-                    canvas[:video_h,:]=cam
+                    canvas[yoff:yoff+nh,xoff:xoff+nw]=cam
                     mp_img=mp.Image(image_format=mp.ImageFormat.SRGB,
                                     data=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
                     result=detector.detect_for_video(mp_img,ts_ms)
                     draw_skeleton(canvas,result)
-                    canvas[:video_h,:]=scanlines(canvas[:video_h,:],gap=4,alpha=0.06)
-                    canvas[:video_h,:]=vignette(canvas[:video_h,:],strength=0.32)
+                    roi=canvas[yoff:yoff+nh,xoff:xoff+nw]
+                    roi[:]=scanlines(roi.copy(),gap=4,alpha=0.06)
+                    roi[:]=vignette(roi.copy(),strength=0.32)
             else:
                 label(canvas,"NO CAMERA  ·  CSI-ONLY MODE",
                       W//2-110,H//2,TEXT_SEC,scale=0.50)
@@ -511,11 +526,12 @@ def main():
             label(canvas,time.strftime("%Y-%m-%d  %H:%M:%S"),12,31,TEXT_SEC,scale=0.34)
             hline(canvas,40,0,W,BORDER)
 
-            # presence corner brackets
+            # presence corner brackets — on video frame edges
             if csi_present:
                 pulse=abs(math.sin(time.time()*3));L=24
                 bri=tuple(int(c*(0.5+0.5*pulse)) for c in ACCENT)
-                for(x,y,sx,sy) in[(1,1,1,1),(W-2,1,-1,1),(1,video_h-1,1,-1),(W-2,video_h-1,-1,-1)]:
+                x1=vx+1;y1=vy+1;x2=vx+vw-2;y2=vy+vh-2
+                for(x,y,sx,sy) in[(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
                     cv2.line(canvas,(x,y),(x+sx*L,y),bri,2,cv2.LINE_AA)
                     cv2.line(canvas,(x,y),(x,y+sy*L),bri,2,cv2.LINE_AA)
 
