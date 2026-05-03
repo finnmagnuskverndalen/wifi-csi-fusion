@@ -92,6 +92,48 @@ def rand_log(nodes=3):
         s=random.randint(1,12),tx=random.uniform(-3,3),ty=random.uniform(0,4),
     )
 
+
+class WallModel:
+    CONNS=[(0,1),(0,2),(1,3),(2,4),(5,6),(5,7),(7,9),(6,8),(8,10),
+           (5,11),(6,12),(11,12),(11,13),(13,15),(12,14),(14,16)]
+    def __init__(self,path):
+        d=np.load(path)
+        self.W1=d["W1"];self.b1=d["b1"]
+        self.W2=d["W2"];self.b2=d["b2"]
+        self.W3=d["W3"];self.b3=d["b3"]
+        self.Xm=d["X_mean"];self.Xs=d["X_std"]
+        self.Ym=d["Y_mean"];self.Ys=d["Y_std"]
+        print(f"[MODEL] Through-wall model loaded: {path}")
+    def predict(self,csi):
+        x=(np.array(csi,dtype=np.float32)-self.Xm)/self.Xs
+        a1=np.maximum(0,x@self.W1+self.b1)
+        a2=np.maximum(0,a1@self.W2+self.b2)
+        out=a2@self.W3+self.b3
+        return (out*self.Ys+self.Ym).reshape(17,3)
+    def draw(self,canvas,kps,ox,oy,ow,oh):
+        pts=[(ox+int(kp[0]*ow),oy+int(kp[1]*oh)) for kp in kps]
+        for a,b in self.CONNS:
+            if a<len(pts) and b<len(pts):
+                cv2.line(canvas,pts[a],pts[b],(0,180,255),2,cv2.LINE_AA)
+        for px,py in pts:
+            cv2.circle(canvas,(px,py),4,(0,220,255),-1,cv2.LINE_AA)
+            cv2.circle(canvas,(px,py),4,(0,100,150),1,cv2.LINE_AA)
+
+def build_csi_vector(snap,n_nodes,timeout=3.0):
+    now=time.time();vec=[]
+    for nid in range(1,n_nodes+1):
+        data=snap.get(nid)
+        if data and now-data.get("received_at",0)<timeout:
+            amps=data.get("amplitudes",[])
+            if amps:
+                padded=(amps+[0.0]*56)[:56]
+                vec.extend(padded+[float(np.mean(amps)),
+                                   float(np.var(amps)),
+                                   float(data.get("rssi",0))])
+                continue
+        vec.extend([0.0]*59)
+    return vec
+
 def hline(img,y,x0,x1,col,t=1):
     cv2.line(img,(x0,y),(x1,y),col,t)
 
@@ -411,6 +453,8 @@ def main():
     ap.add_argument("--no-camera",action="store_true")
     ap.add_argument("--positions",type=str,default="0,0,0.4;2,4,1.0;-5,4,1.0")
     ap.add_argument("--room",type=str,default="10x5")
+    ap.add_argument("--model",type=str,default="",
+                    help="Path to .npz model for through-wall skeleton")
     ap.add_argument("--width",type=int,default=WIN_W)
     ap.add_argument("--height",type=int,default=WIN_H)
     args=ap.parse_args()
@@ -430,6 +474,11 @@ def main():
                 node_pos[idx]=(x,y,z)
             except ValueError:pass
 
+    wall_model=None
+    if args.model:
+        mp=args.model if args.model.endswith('.npz') else args.model+'.npz'
+        if os.path.exists(mp):wall_model=WallModel(mp)
+        else:print(f'[WARN] Model not found: {mp}')
     rx=CSIReceiver(port=args.port);ests={};rx.start()
     term=Terminal()
     room=RoomMap(node_pos,room_w=room_w,room_d=room_d)
@@ -544,6 +593,14 @@ def main():
                 draw_nodes(canvas,snap,ests,args.timeout,W,H)
             if show_map:
                 room.draw(canvas,snap,args.timeout,W,H)
+                if wall_model:
+                    cv=build_csi_vector(snap,len(node_pos),args.timeout)
+                    if any(v!=0 for v in cv):
+                        kps=wall_model.predict(cv)
+                        PAD=16;OW=420;OH=320
+                        OX=W-OW-PAD;OY=50+PAD
+                        MX=OX+6;MY=OY+30;MW=OW-12;MH=OH-38
+                        wall_model.draw(canvas,kps,MX,MY,MW,MH)
 
             # ── HUD ───────────────────────────────────────────────────────────
             fps_q.append(time.time()-t0)
