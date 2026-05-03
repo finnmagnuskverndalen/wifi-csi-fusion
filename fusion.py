@@ -141,9 +141,7 @@ class Terminal:
         n=len(self.lines)
         if n==0: return
         y0=bottom_y-n*self.LH
-        ov=canvas.copy()
-        cv2.rectangle(ov,(x-6,y0-6),(x+max_w+6,y0+n*self.LH+4),(8,10,12),-1)
-        cv2.addWeighted(ov,0.72,canvas,0.28,0,canvas)
+        # no backdrop — text only
         blink=int(time.time()*2)%2==0
         for i,line in enumerate(self.lines):
             y=y0+i*self.LH; last=(i==n-1)
