@@ -1,0 +1,13 @@
+{
+  "udp_port": 5005,
+  "camera_id": 0,
+  "window_width": 1280,
+  "window_height": 480,
+  "csi_timeout": 3.0,
+  "node_positions": "0,0,0.4;2,4,1.0;-5,4,1.0",
+  "notes": {
+    "node_1": "Center wall, 40cm high",
+    "node_2": "Left wall, 2m right of node 1, 1m high",
+    "node_3": "Right wall, 5m left of node 1, 1m high"
+  }
+}
