@@ -1,6 +1,6 @@
 """
 WiFi CSI Fusion — Professional Edition
-Camera + MediaPipe | 2D Room Map heatmap | CSI node list
+16:9 windowed · toggle overlays · fullscreen camera
 """
 
 import socket, struct, threading, time, argparse, collections, math
@@ -13,26 +13,29 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 
-BG          = (10,  12,  14)
-PANEL_BG    = (14,  17,  20)
-BORDER      = (30,  35,  40)
-ACCENT      = (0,   210, 120)
-ACCENT_DIM  = (0,   90,  50)
-TEXT_PRI    = (220, 230, 225)
-TEXT_SEC    = (90,  105, 100)
-TEXT_DIM    = (45,  55,  50)
-WARN        = (0,   180, 220)
-DANGER      = (50,  60,  220)
-SKEL_LINE   = (0,   190, 100)
-SKEL_JOINT  = (0,   255, 140)
-SKEL_JOINT2 = (0,   120, 60)
-MAP_BG      = (8,   12,  10)
-MAP_GRID    = (18,  28,  20)
+BG         = (10,  12,  14)
+PANEL_BG   = (14,  17,  20)
+BORDER     = (30,  35,  40)
+ACCENT     = (0,   210, 120)
+ACCENT_DIM = (0,   90,  50)
+TEXT_PRI   = (220, 230, 225)
+TEXT_SEC   = (90,  105, 100)
+TEXT_DIM   = (45,  55,  50)
+WARN       = (0,   180, 220)
+DANGER     = (50,  60,  220)
+SKEL_LINE  = (0,   190, 100)
+SKEL_JOINT = (0,   255, 140)
+SKEL_J2    = (0,   120, 60)
+MAP_BG     = (8,   12,  10)
+MAP_GRID   = (18,  28,  20)
+
+# 16:9 window
+WIN_W = 1280
+WIN_H = 720
+BTN_H = 40
 
 DEFAULT_UDP_PORT = 5005
 DEFAULT_CAMERA   = 0
-DEFAULT_W        = 1800
-DEFAULT_H        = 640
 DEFAULT_TIMEOUT  = 5.0
 MODEL_PATH       = "pose_landmarker.task"
 MODEL_URL        = ("https://storage.googleapis.com/mediapipe-models/"
@@ -89,17 +92,17 @@ def rand_log(nodes=3):
         s=random.randint(1,12),tx=random.uniform(-3,3),ty=random.uniform(0,4),
     )
 
-def hline(img,y,x0,x1,color,t=1):
-    cv2.line(img,(x0,y),(x1,y),color,t)
+def hline(img,y,x0,x1,col,t=1):
+    cv2.line(img,(x0,y),(x1,y),col,t)
 
-def label(img,text,x,y,color=TEXT_PRI,scale=0.42,t=1):
+def label(img,text,x,y,color=TEXT_PRI,scale=0.40,t=1):
     cv2.putText(img,text,(x,y),cv2.FONT_HERSHEY_SIMPLEX,scale,color,t,cv2.LINE_AA)
 
 def tag(img,text,x,y,fg,bg):
-    (tw,th),_=cv2.getTextSize(text,cv2.FONT_HERSHEY_SIMPLEX,0.36,1)
-    cv2.rectangle(img,(x,y-th-2),(x+tw+12,y+4),bg,-1)
-    label(img,text,x+6,y,fg,scale=0.36)
-    return x+tw+18
+    (tw,th),_=cv2.getTextSize(text,cv2.FONT_HERSHEY_SIMPLEX,0.34,1)
+    cv2.rectangle(img,(x,y-th-2),(x+tw+10,y+4),bg,-1)
+    label(img,text,x+5,y,fg,scale=0.34)
+    return x+tw+16
 
 def scanlines(frame,gap=4,alpha=0.06):
     for y in range(0,frame.shape[0],gap):
@@ -107,9 +110,9 @@ def scanlines(frame,gap=4,alpha=0.06):
     return frame
 
 _vig={}
-def vignette(frame,strength=0.40):
+def vignette(frame,strength=0.38):
     h,w=frame.shape[:2]
-    if (h,w) not in _vig:
+    if(h,w) not in _vig:
         k=np.zeros((h,w),dtype=np.float32)
         cx,cy=w/2,h/2
         for y in range(h):
@@ -122,19 +125,53 @@ def vignette(frame,strength=0.40):
     return np.clip(out,0,255).astype(np.uint8)
 
 
+# ── HUD bar ───────────────────────────────────────────────────────────────────
+def draw_hud(canvas,W,H,show_map,show_nodes,csi_present,fps,online_n,total_n):
+    bar_y=H-BTN_H
+    ov=canvas.copy()
+    cv2.rectangle(ov,(0,bar_y),(W,H),(5,7,9),-1)
+    cv2.addWeighted(ov,0.85,canvas,0.15,0,canvas)
+    hline(canvas,bar_y,0,W,BORDER)
+
+    # left status
+    sc=ACCENT if csi_present else TEXT_DIM
+    cv2.circle(canvas,(18,bar_y+20),5,sc,-1)
+    label(canvas,"PRESENCE" if csi_present else "NO PRESENCE",28,bar_y+24,sc,scale=0.38)
+    label(canvas,f"NODES {online_n}/{total_n}",160,bar_y+24,
+          ACCENT if online_n>0 else DANGER,scale=0.36)
+    label(canvas,f"{fps:.0f} FPS",260,bar_y+24,TEXT_DIM,scale=0.36)
+    label(canvas,time.strftime("%H:%M:%S"),330,bar_y+24,TEXT_DIM,scale=0.36)
+
+    # right buttons
+    buttons=[("1  NODES",show_nodes),("2  MAP",show_map),
+             ("S  SAVE",False),("Q  QUIT",False)]
+    bx=W-10
+    for txt,active in reversed(buttons):
+        (tw,_),_=cv2.getTextSize(txt,cv2.FONT_HERSHEY_SIMPLEX,0.36,1)
+        bw=tw+20; bx-=bw+6
+        by=bar_y+5; bh=BTN_H-10
+        cv2.rectangle(canvas,(bx,by),(bx+bw,by+bh),
+                      ACCENT_DIM if active else (20,24,26),-1)
+        cv2.rectangle(canvas,(bx,by),(bx+bw,by+bh),
+                      ACCENT if active else BORDER,1)
+        label(canvas,txt,bx+10,by+bh-7,
+              ACCENT if active else TEXT_SEC,scale=0.36)
+
+
+# ── Terminal ──────────────────────────────────────────────────────────────────
 class Terminal:
-    LH=15;FSC=0.72;MAX=14
+    LH=15;FSC=0.72;MAX=16
     def __init__(self):
         self.lines=collections.deque(maxlen=self.MAX);self._next=0
     def tick(self,nodes=3):
         if time.time()>self._next:
             self.lines.append(rand_log(nodes))
-            self._next=time.time()+random.uniform(0.1,0.4)
-    def render(self,canvas,x=12,bottom_y=None,max_w=None):
+            self._next=time.time()+random.uniform(0.12,0.4)
+    def render(self,canvas,x=14,bottom_y=None,max_w=None):
         h,w=canvas.shape[:2]
-        if bottom_y is None:bottom_y=h-10
-        if max_w is None:max_w=w-x-10
-        n=len(self.lines)
+        if bottom_y is None:bottom_y=h-BTN_H-8
+        if max_w is None:max_w=w//2
+        n=len(self.lines);
         if n==0:return
         y0=bottom_y-n*self.LH
         blink=int(time.time()*2)%2==0
@@ -151,6 +188,7 @@ class Terminal:
             cv2.rectangle(canvas,(cx,cy-9),(cx+6,cy+1),ACCENT,-1)
 
 
+# ── CSI receiver ──────────────────────────────────────────────────────────────
 def parse_frame(data):
     if len(data)<HEADER_SZ:return None
     try:
@@ -208,151 +246,143 @@ class Motion:
                "variance":var,"mean":m,"signal":signal}
 
 
+# ── Room map overlay ──────────────────────────────────────────────────────────
 class RoomMap:
     HEAT_RES=60;BLUR_K=15
     def __init__(self,node_positions,room_w=10.0,room_d=5.0):
         self.node_pos=node_positions;self.room_w=room_w;self.room_d=room_d
         self.heat=np.zeros((self.HEAT_RES,self.HEAT_RES),dtype=np.float32)
-        self.prev_heat=np.zeros_like(self.heat);self._decay=0.88
+        self.prev=np.zeros_like(self.heat);self._decay=0.88
 
-    def update(self,nodes_snapshot,estimators,timeout):
+    def update(self,snap,ests,timeout):
         now=time.time()
         grid=np.zeros((self.HEAT_RES,self.HEAT_RES),dtype=np.float32)
         gw,gh=self.HEAT_RES,self.HEAT_RES
         for nid,pos in self.node_pos.items():
-            data=nodes_snapshot.get(nid)
+            data=snap.get(nid)
             if data is None or now-data["received_at"]>timeout:continue
-            est=estimators.get(nid)
+            est=ests.get(nid)
             if est is None:continue
-            result=est.update(data.get("amplitudes",[]))
-            if not result["presence"]:continue
-            signal=result["signal"];var=result["variance"]
+            res=est.update(data.get("amplitudes",[]))
+            if not res["presence"]:continue
             nx,ny=pos[0],pos[1]
+            sig=res["signal"];var=res["variance"]
             for gy in range(gh):
                 for gx in range(gw):
                     wx=(gx/gw-0.5)*self.room_w
                     wy=(1.0-gy/gh)*self.room_d
                     dist=math.sqrt((wx-nx)**2+(wy-ny)**2)+0.5
-                    grid[gy,gx]+=(signal/30.0)*var*(1.0/(dist**1.5))
-        if grid.max()>0:grid=grid/grid.max()
+                    grid[gy,gx]+=(sig/30.0)*var*(1.0/(dist**1.5))
+        if grid.max()>0:grid/=grid.max()
         blurred=cv2.GaussianBlur(grid,(self.BLUR_K,self.BLUR_K),0)
-        self.heat=self._decay*self.prev_heat+(1-self._decay)*blurred
-        self.prev_heat=self.heat.copy()
+        self.heat=self._decay*self.prev+(1-self._decay)*blurred
+        self.prev=self.heat.copy()
 
-    def render(self,pw,ph,nodes_snapshot,timeout):
-        panel=np.full((ph,pw,3),MAP_BG,dtype=np.uint8);now=time.time()
-        cv2.rectangle(panel,(0,0),(pw,44),BG,-1)
-        label(panel,"ROOM MAP",14,17,ACCENT,scale=0.50)
-        label(panel,"CSI TRILATERATION  ·  THROUGH-WALL",14,33,TEXT_SEC,scale=0.36)
-        label(panel,f"{self.room_w:.0f}m x {self.room_d:.0f}m",pw-70,17,TEXT_SEC,scale=0.38)
-        hline(panel,44,0,pw,BORDER)
-        MX=12;MY=50;MW=pw-24;MH=ph-90
-        cv2.rectangle(panel,(MX,MY),(MX+MW,MY+MH),MAP_BG,-1)
+    def draw(self,canvas,snap,timeout,W,H):
+        PAD=16;OW=420;OH=320
+        OX=W-OW-PAD;OY=50+PAD;now=time.time()
+        ov=canvas.copy()
+        cv2.rectangle(ov,(OX,OY),(OX+OW,OY+OH),MAP_BG,-1)
+        cv2.addWeighted(ov,0.93,canvas,0.07,0,canvas)
+        cv2.rectangle(canvas,(OX,OY),(OX+OW,OY+26),BG,-1)
+        label(canvas,"ROOM MAP  ·  THROUGH-WALL",OX+8,OY+17,ACCENT,scale=0.40)
+        label(canvas,f"{self.room_w:.0f}m×{self.room_d:.0f}m",
+              OX+OW-48,OY+17,TEXT_SEC,scale=0.32)
+        hline(canvas,OY+26,OX,OX+OW,BORDER)
+        cv2.rectangle(canvas,(OX,OY),(OX+OW,OY+OH),BORDER,1)
+        MX=OX+6;MY=OY+30;MW=OW-12;MH=OH-38
         for i in range(11):
-            x=MX+int(i*MW/10);cv2.line(panel,(x,MY),(x,MY+MH),MAP_GRID,1)
+            x=MX+int(i*MW/10);cv2.line(canvas,(x,MY),(x,MY+MH),MAP_GRID,1)
         for i in range(6):
-            y=MY+int(i*MH/5);cv2.line(panel,(MX,y),(MX+MW,y),MAP_GRID,1)
+            y=MY+int(i*MH/5);cv2.line(canvas,(MX,y),(MX+MW,y),MAP_GRID,1)
         if self.heat.max()>0.01:
-            heat_u8=(np.clip(self.heat,0,1)*255).astype(np.uint8)
-            heat_up=cv2.resize(heat_u8,(MW,MH),interpolation=cv2.INTER_LINEAR)
-            heat_rgb=np.zeros((MH,MW,3),dtype=np.uint8)
-            heat_rgb[:,:,1]=heat_up
-            heat_rgb[:,:,0]=(heat_up.astype(np.float32)*0.1).astype(np.uint8)
-            heat_rgb[:,:,2]=(heat_up.astype(np.float32)*0.05).astype(np.uint8)
-            bright=np.clip((heat_up.astype(np.float32)/255.0-0.6)/0.4,0,1)
-            heat_rgb[:,:,1]=np.clip(heat_rgb[:,:,1].astype(np.float32)+bright*60,0,255).astype(np.uint8)
-            roi=panel[MY:MY+MH,MX:MX+MW]
-            cv2.addWeighted(heat_rgb,0.75,roi,0.25,0,roi)
-        cv2.rectangle(panel,(MX,MY),(MX+MW,MY+MH),BORDER,1)
+            h8=(np.clip(self.heat,0,1)*255).astype(np.uint8)
+            hup=cv2.resize(h8,(MW,MH),interpolation=cv2.INTER_LINEAR)
+            hrgb=np.zeros((MH,MW,3),dtype=np.uint8)
+            hrgb[:,:,1]=hup
+            hrgb[:,:,0]=(hup.astype(np.float32)*0.1).astype(np.uint8)
+            bright=np.clip((hup.astype(np.float32)/255.0-0.6)/0.4,0,1)
+            hrgb[:,:,1]=np.clip(hrgb[:,:,1].astype(np.float32)+bright*55,0,255).astype(np.uint8)
+            roi=canvas[MY:MY+MH,MX:MX+MW]
+            cv2.addWeighted(hrgb,0.80,roi,0.20,0,roi)
         for nid,pos in self.node_pos.items():
             xw,yw=pos[0],pos[1]
-            data=nodes_snapshot.get(nid)
+            data=snap.get(nid)
             age=now-data["received_at"] if data else timeout+1
             online=data is not None and age<timeout
-            px_fx=(xw/self.room_w+0.5);px_fy=1.0-yw/self.room_d
-            px=MX+int(np.clip(px_fx,0,1)*MW);py=MY+int(np.clip(px_fy,0,1)*MH)
+            px=MX+int(np.clip(xw/self.room_w+0.5,0,1)*MW)
+            py=MY+int(np.clip(1.0-yw/self.room_d,0,1)*MH)
             if online:
-                pulse=int(abs(math.sin(time.time()*2+nid))*12)
-                cv2.circle(panel,(px,py),14+pulse,(0,80,40),1,cv2.LINE_AA)
-                cv2.circle(panel,(px,py),8,ACCENT,-1,cv2.LINE_AA)
-                cv2.circle(panel,(px,py),8,BG,1,cv2.LINE_AA)
-                r_px=int(2.5/self.room_w*MW)
-                cv2.circle(panel,(px,py),r_px,ACCENT_DIM,1,cv2.LINE_AA)
+                pulse=int(abs(math.sin(time.time()*2+nid))*10)
+                cv2.circle(canvas,(px,py),12+pulse,(0,70,35),1,cv2.LINE_AA)
+                cv2.circle(canvas,(px,py),6,ACCENT,-1,cv2.LINE_AA)
+                cv2.circle(canvas,(px,py),int(2.5/self.room_w*MW),ACCENT_DIM,1,cv2.LINE_AA)
             else:
-                cv2.circle(panel,(px,py),8,DANGER,-1,cv2.LINE_AA)
-            label(panel,f"N{nid}",px-6,py-12,TEXT_PRI,scale=0.38)
-        m_px=int(MW/self.room_w);sb_x=MX+8;sb_y=MY+MH-10
-        cv2.line(panel,(sb_x,sb_y),(sb_x+m_px,sb_y),TEXT_SEC,1)
-        cv2.line(panel,(sb_x,sb_y-3),(sb_x,sb_y+3),TEXT_SEC,1)
-        cv2.line(panel,(sb_x+m_px,sb_y-3),(sb_x+m_px,sb_y+3),TEXT_SEC,1)
-        label(panel,"1 m",sb_x+m_px+4,sb_y+4,TEXT_DIM,scale=0.32)
-        hline(panel,ph-32,0,pw,BORDER)
-        cv2.rectangle(panel,(0,ph-32),(pw,ph),BG,-1)
-        heat_max=float(self.heat.max())
-        if heat_max>0.15:
-            label(panel,"PRESENCE DETECTED  ·  THROUGH-WALL ACTIVE",14,ph-12,ACCENT,scale=0.40)
-        else:
-            label(panel,"NO PRESENCE  ·  MONITORING",14,ph-12,TEXT_DIM,scale=0.40)
-        label(panel,f"HEAT {heat_max*100:.0f}%",pw-70,ph-12,TEXT_SEC,scale=0.36)
-        return panel
+                cv2.circle(canvas,(px,py),6,DANGER,-1,cv2.LINE_AA)
+            label(canvas,f"N{nid}",px-4,py-9,TEXT_PRI,scale=0.32)
+        hmax=float(self.heat.max())
+        label(canvas,"DETECTED" if hmax>0.15 else "MONITORING",
+              OX+8,OY+OH-6,ACCENT if hmax>0.15 else TEXT_DIM,scale=0.32)
+        label(canvas,f"{hmax*100:.0f}%",OX+OW-36,OY+OH-6,TEXT_SEC,scale=0.30)
 
 
-def make_csi_panel(nodes,ests,timeout,pw,ph):
-    img=np.full((ph,pw,3),PANEL_BG,dtype=np.uint8);now=time.time()
-    cv2.rectangle(img,(0,0),(pw,44),BG,-1)
-    label(img,"CSI  NODES",14,17,ACCENT,scale=0.50)
-    label(img,"RUVECTOR v2.0.4  ·  ADR-018",14,33,TEXT_SEC,scale=0.36)
-    label(img,time.strftime("%H:%M:%S"),pw-68,17,TEXT_SEC,scale=0.40)
+# ── Nodes overlay ─────────────────────────────────────────────────────────────
+def draw_nodes(canvas,nodes,ests,timeout,W,H):
+    PAD=16;OW=340;now=time.time()
+    OH=min(380,H-BTN_H-50-PAD*2)
+    OX=PAD;OY=50+PAD
+    ov=canvas.copy()
+    cv2.rectangle(ov,(OX,OY),(OX+OW,OY+OH),PANEL_BG,-1)
+    cv2.addWeighted(ov,0.93,canvas,0.07,0,canvas)
+    cv2.rectangle(canvas,(OX,OY),(OX+OW,OY+26),BG,-1)
+    label(canvas,"CSI  NODES",OX+8,OY+17,ACCENT,scale=0.40)
     online_n=sum(1 for d in nodes.values() if now-d["received_at"]<timeout)
-    label(img,f"{online_n}/{len(nodes) or 0} ONLINE",pw-80,33,
+    label(canvas,f"{online_n}/{len(nodes) or 0}",OX+OW-28,OY+17,
           ACCENT if online_n>0 else DANGER,scale=0.36)
-    hline(img,44,0,pw,BORDER)
-    slot_h=(ph-44-32)//6
+    hline(canvas,OY+26,OX,OX+OW,BORDER)
+    cv2.rectangle(canvas,(OX,OY),(OX+OW,OY+OH),BORDER,1)
+    slot_h=(OH-28)//6
     for idx in range(1,7):
-        y0=44+(idx-1)*slot_h;data=nodes.get(idx)
+        y0=OY+26+(idx-1)*slot_h
+        data=nodes.get(idx)
         age=now-data["received_at"] if data else timeout+1
         online=data is not None and age<timeout
-        hline(img,y0,10,pw-10,BORDER)
+        hline(canvas,y0,OX+4,OX+OW-4,BORDER)
         pulse=0.5+0.5*abs(math.sin(time.time()*2.5+idx))
-        dot_col=tuple(int(c*pulse) for c in ACCENT) if online else DANGER
-        cv2.circle(img,(22,y0+slot_h//2),5,dot_col,-1)
-        node_y=y0+18
-        label(img,f"NODE  {idx}",38,node_y,TEXT_PRI,scale=0.44)
+        dot=tuple(int(c*pulse) for c in ACCENT) if online else DANGER
+        cv2.circle(canvas,(OX+14,y0+slot_h//2),4,dot,-1)
+        ny=y0+14
+        label(canvas,f"NODE {idx}",OX+26,ny,TEXT_PRI,scale=0.38)
         if not online:
-            label(img,"OFFLINE",pw-68,node_y,DANGER,scale=0.38)
-            label(img,"waiting for stream",38,node_y+14,TEXT_DIM,scale=0.34)
-            continue
-        est=ests.setdefault(idx,Motion());res=est.update(data.get("amplitudes",[]))
+            label(canvas,"OFFLINE",OX+OW-62,ny,DANGER,scale=0.32);continue
+        est=ests.setdefault(idx,Motion())
+        res=est.update(data.get("amplitudes",[]))
         rssi=data.get("rssi",0);sc=data.get("sc_count",0)
         motion=res["motion"];pres=res["presence"];var=res["variance"]
-        ip=data.get("ip","")
-        if pres:tag(img,"PRESENT",pw-86,node_y+2,BG,ACCENT)
-        else:tag(img,"EMPTY",pw-70,node_y+2,TEXT_SEC,BORDER)
-        label(img,f"RSSI {rssi}  SC {sc}  VAR {var:.1f}  {ip}",
-              38,node_y+14,TEXT_SEC,scale=0.32)
-        bx=38;by=y0+slot_h-14;bw=pw-52
-        cv2.rectangle(img,(bx,by),(bx+bw,by+3),BORDER,-1)
+        if pres:tag(canvas,"PRES",OX+OW-56,ny+1,BG,ACCENT)
+        else:tag(canvas,"EMPTY",OX+OW-58,ny+1,TEXT_SEC,BORDER)
+        label(canvas,f"RSSI {rssi}  SC {sc}  VAR {var:.1f}",
+              OX+26,ny+12,TEXT_SEC,scale=0.28)
+        bx=OX+26;by=y0+slot_h-10;bw=OW-34
+        cv2.rectangle(canvas,(bx,by),(bx+bw,by+3),BORDER,-1)
         filled=int(bw*motion)
         if filled>0:
-            cv2.rectangle(img,(bx,by),(bx+filled,by+3),
+            cv2.rectangle(canvas,(bx,by),(bx+filled,by+3),
                           WARN if motion>0.55 else ACCENT,-1)
         amps=data.get("amplitudes",[])
         if len(amps)>4:
-            sy=y0+slot_h-26;sh=9;step=max(1,len(amps)//bw)
+            sy=y0+slot_h-22;sh=8;step=max(1,len(amps)//bw)
             samp=amps[::step][:bw];mx=max(samp) or 1
             pts=[(bx+i,sy+sh-int(sh*v/mx)) for i,v in enumerate(samp)]
             for i in range(len(pts)-1):
                 frac=samp[i]/mx
                 c=tuple(int(a+(b-a)*frac) for a,b in zip(ACCENT_DIM,ACCENT))
-                cv2.line(img,pts[i],pts[i+1],c,1,cv2.LINE_AA)
-    hline(img,ph-32,0,pw,BORDER)
-    cv2.rectangle(img,(0,ph-32),(pw,ph),BG,-1)
-    label(img,f"UDP :5005  ·  2.4 GHz  ·  {online_n} ACTIVE",14,ph-12,TEXT_DIM,scale=0.34)
-    return img
+                cv2.line(canvas,pts[i],pts[i+1],c,1,cv2.LINE_AA)
 
 
+# ── Skeleton ──────────────────────────────────────────────────────────────────
 def draw_skeleton(frame,result):
-    if not result or not result.pose_landmarks:return frame
+    if not result or not result.pose_landmarks:return
     h,w=frame.shape[:2]
     for person in result.pose_landmarks:
         pts=[(int(lm.x*w),int(lm.y*h)) for lm in person]
@@ -363,43 +393,7 @@ def draw_skeleton(frame,result):
         for i,(x,y) in enumerate(pts):
             if i<len(vis) and vis[i]>0.4:
                 cv2.circle(frame,(x,y),4,SKEL_JOINT,-1,cv2.LINE_AA)
-                cv2.circle(frame,(x,y),4,SKEL_JOINT2,1,cv2.LINE_AA)
-    return frame
-
-
-def make_cam_panel(frame,result,csi_present,terminal,nodes_n,pw,ph):
-    p=cv2.resize(frame,(pw,ph))
-    gray=cv2.cvtColor(p,cv2.COLOR_BGR2GRAY)
-    gray3=cv2.cvtColor(gray,cv2.COLOR_GRAY2BGR)
-    p=cv2.addWeighted(p,0.30,gray3,0.70,0)
-    p=cv2.addWeighted(p,0.80,np.zeros_like(p),0.20,0)
-    p[:,:,1]=np.clip(p[:,:,1].astype(np.int32)+8,0,255).astype(np.uint8)
-    p=draw_skeleton(p,result)
-    p=scanlines(p,gap=4,alpha=0.07)
-    p=vignette(p,strength=0.45)
-    ov=p.copy()
-    cv2.rectangle(ov,(0,0),(pw,44),(0,0,0),-1)
-    cv2.addWeighted(ov,0.65,p,0.35,0,p)
-    label(p,"CAMERA  ·  MEDIAPIPE POSE  ·  CSI FUSION",14,17,TEXT_PRI,scale=0.46)
-    label(p,time.strftime("%Y-%m-%d  %H:%M:%S"),14,33,TEXT_SEC,scale=0.36)
-    hline(p,44,0,pw,BORDER)
-    if csi_present:
-        pulse=abs(math.sin(time.time()*3.0));L=22
-        bri=tuple(int(c*(0.5+0.5*pulse)) for c in ACCENT)
-        for(x,y,sx,sy) in[(1,1,1,1),(pw-2,1,-1,1),(1,ph-2,1,-1),(pw-2,ph-2,-1,-1)]:
-            cv2.line(p,(x,y),(x+sx*L,y),bri,2,cv2.LINE_AA)
-            cv2.line(p,(x,y),(x,y+sy*L),bri,2,cv2.LINE_AA)
-    ov2=p.copy()
-    cv2.rectangle(ov2,(0,ph-32),(pw,ph),(0,0,0),-1)
-    cv2.addWeighted(ov2,0.65,p,0.35,0,p)
-    hline(p,ph-32,0,pw,BORDER)
-    label(p,"CSI  PRESENCE  CONFIRMED" if csi_present else "CSI  NO PRESENCE",
-          14,ph-12,ACCENT if csi_present else TEXT_DIM,scale=0.42)
-    pose_n=len(result.pose_landmarks) if result and result.pose_landmarks else 0
-    label(p,f"POSES: {pose_n}",pw-72,ph-12,TEXT_SEC,scale=0.36)
-    terminal.tick(nodes=nodes_n)
-    terminal.render(p,x=14,bottom_y=ph-38,max_w=pw-28)
-    return p
+                cv2.circle(frame,(x,y),4,SKEL_J2,1,cv2.LINE_AA)
 
 
 def download_model():
@@ -413,14 +407,17 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--port",type=int,default=DEFAULT_UDP_PORT)
     ap.add_argument("--camera",type=int,default=DEFAULT_CAMERA)
-    ap.add_argument("--width",type=int,default=DEFAULT_W)
-    ap.add_argument("--height",type=int,default=DEFAULT_H)
     ap.add_argument("--timeout",type=float,default=DEFAULT_TIMEOUT)
     ap.add_argument("--no-camera",action="store_true")
     ap.add_argument("--positions",type=str,default="0,0,0.4;2,4,1.0;-5,4,1.0")
-    ap.add_argument("--room",type=str,default="10x5",
-                    help="Room WxD in metres e.g. 10x5")
+    ap.add_argument("--room",type=str,default="10x5")
+    ap.add_argument("--width",type=int,default=WIN_W)
+    ap.add_argument("--height",type=int,default=WIN_H)
     args=ap.parse_args()
+
+    W=args.width; H=args.height
+    # enforce 16:9
+    H=int(W*9/16)
 
     try:room_w,room_d=map(float,args.room.lower().split("x"))
     except Exception:room_w,room_d=10.0,5.0
@@ -433,14 +430,12 @@ def main():
                 node_pos[idx]=(x,y,z)
             except ValueError:pass
 
-    total_w=args.width;ph=args.height
-    cam_w=int(total_w*0.40);map_w=int(total_w*0.35);csi_w=total_w-cam_w-map_w
-
     rx=CSIReceiver(port=args.port);ests={};rx.start()
     term=Terminal()
     room=RoomMap(node_pos,room_w=room_w,room_d=room_d)
-    cap=detector=None
+    show_map=False;show_nodes=False
 
+    cap=detector=None
     if not args.no_camera:
         download_model()
         cap=cv2.VideoCapture(args.camera)
@@ -458,12 +453,12 @@ def main():
             print("[INFO] Pose detector online")
 
     cv2.namedWindow("WiFi CSI Fusion",cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("WiFi CSI Fusion",total_w,ph)
-    print("[INFO] Q=quit  S=screenshot")
-    print(f"[INFO] Room {room_w}m x {room_d}m  |  {len(node_pos)} nodes configured")
+    cv2.resizeWindow("WiFi CSI Fusion",W,H)
+
+    print(f"[INFO] Window {W}x{H} (16:9)")
+    print("[INFO] 1=nodes  2=map  S=screenshot  Q=quit")
 
     fps_q=collections.deque(maxlen=30);ts_ms=0
-    div=np.full((ph,1,3),BORDER,dtype=np.uint8)
 
     try:
         while True:
@@ -475,33 +470,80 @@ def main():
                 for nid,d in snap.items()
             )
             room.update(snap,ests,args.timeout)
-            cp=make_csi_panel(snap,ests,args.timeout,csi_w,ph)
-            mp_=room.render(map_w,ph,snap,args.timeout)
+
+            # ── canvas ────────────────────────────────────────────────────────
+            canvas=np.full((H,W,3),BG,dtype=np.uint8)
+            video_h=H-BTN_H
+
             result=None
             if cap and detector:
                 ok,frame=cap.read()
                 if ok:
                     ts_ms+=33
+                    # crop camera to 16:9 in case it's different ratio
+                    fh,fw=frame.shape[:2]
+                    target_w=int(fh*16/9)
+                    if target_w<=fw:
+                        x0=(fw-target_w)//2
+                        frame=frame[:,x0:x0+target_w]
+                    cam=cv2.resize(frame,(W,video_h))
+                    gray=cv2.cvtColor(cam,cv2.COLOR_BGR2GRAY)
+                    gray3=cv2.cvtColor(gray,cv2.COLOR_GRAY2BGR)
+                    cam=cv2.addWeighted(cam,0.28,gray3,0.72,0)
+                    cam=cv2.addWeighted(cam,0.82,np.zeros_like(cam),0.18,0)
+                    cam[:,:,1]=np.clip(cam[:,:,1].astype(np.int32)+6,0,255).astype(np.uint8)
+                    canvas[:video_h,:]=cam
                     mp_img=mp.Image(image_format=mp.ImageFormat.SRGB,
                                     data=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
                     result=detector.detect_for_video(mp_img,ts_ms)
-                    vp=make_cam_panel(frame,result,csi_present,term,len(snap),cam_w,ph)
-                else:
-                    vp=np.full((ph,cam_w,3),BG,dtype=np.uint8)
+                    draw_skeleton(canvas,result)
+                    canvas[:video_h,:]=scanlines(canvas[:video_h,:],gap=4,alpha=0.06)
+                    canvas[:video_h,:]=vignette(canvas[:video_h,:],strength=0.32)
             else:
-                vp=np.full((ph,cam_w,3),BG,dtype=np.uint8)
-                label(vp,"NO CAMERA  ·  CSI-ONLY MODE",cam_w//2-110,ph//2,TEXT_SEC,scale=0.45)
-                term.tick(len(snap));term.render(vp,x=14,bottom_y=ph-14)
-            composed=np.hstack([vp,div,mp_,div,cp])
+                label(canvas,"NO CAMERA  ·  CSI-ONLY MODE",
+                      W//2-110,H//2,TEXT_SEC,scale=0.50)
+
+            # ── top bar ───────────────────────────────────────────────────────
+            ov=canvas.copy()
+            cv2.rectangle(ov,(0,0),(W,40),(0,0,0),-1)
+            cv2.addWeighted(ov,0.65,canvas,0.35,0,canvas)
+            label(canvas,"WiFi CSI FUSION  ·  MEDIAPIPE POSE",12,15,TEXT_PRI,scale=0.46)
+            label(canvas,time.strftime("%Y-%m-%d  %H:%M:%S"),12,31,TEXT_SEC,scale=0.34)
+            hline(canvas,40,0,W,BORDER)
+
+            # presence corner brackets
+            if csi_present:
+                pulse=abs(math.sin(time.time()*3));L=24
+                bri=tuple(int(c*(0.5+0.5*pulse)) for c in ACCENT)
+                for(x,y,sx,sy) in[(1,1,1,1),(W-2,1,-1,1),(1,video_h-1,1,-1),(W-2,video_h-1,-1,-1)]:
+                    cv2.line(canvas,(x,y),(x+sx*L,y),bri,2,cv2.LINE_AA)
+                    cv2.line(canvas,(x,y),(x,y+sy*L),bri,2,cv2.LINE_AA)
+
+            # ── terminal log ──────────────────────────────────────────────────
+            term.tick(len(snap))
+            term.render(canvas,x=14,bottom_y=video_h-8,max_w=W//2)
+
+            # ── overlays ──────────────────────────────────────────────────────
+            if show_nodes:
+                draw_nodes(canvas,snap,ests,args.timeout,W,H)
+            if show_map:
+                room.draw(canvas,snap,args.timeout,W,H)
+
+            # ── HUD ───────────────────────────────────────────────────────────
             fps_q.append(time.time()-t0)
             fps=1.0/(sum(fps_q)/len(fps_q)) if fps_q else 0
-            label(composed,f"{fps:.0f} fps",total_w-55,ph-12,TEXT_DIM,scale=0.36)
-            cv2.imshow("WiFi CSI Fusion",composed)
+            online_n=sum(1 for d in snap.values() if now-d["received_at"]<args.timeout)
+            draw_hud(canvas,W,H,show_map,show_nodes,csi_present,fps,online_n,len(snap))
+
+            cv2.imshow("WiFi CSI Fusion",canvas)
             key=cv2.waitKey(1)&0xFF
             if key==ord("q"):break
+            if key==ord("1"):show_nodes=not show_nodes
+            if key==ord("2"):show_map=not show_map
             if key==ord("s"):
                 fn=f"output/screenshot_{int(time.time())}.png"
-                cv2.imwrite(fn,composed);print(f"[INFO] Saved {fn}")
+                cv2.imwrite(fn,canvas);print(f"[INFO] Saved {fn}")
+
     finally:
         rx.stop()
         if cap:cap.release()
